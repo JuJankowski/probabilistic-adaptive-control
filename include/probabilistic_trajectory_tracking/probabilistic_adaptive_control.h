@@ -33,9 +33,21 @@ struct PACTask {
   bool invalid_references{false};
   ros::Time registration_time;
   
-  TPMode mode; // If there are multiple KF TPModes, this contains the fused mode in the world frame
-  std::vector<TPMode> relative_modes;
+  TPMode root; // If there are multiple KF TPModes, this contains the fused mode in the world frame
+  std::vector<TPMode> modes;
   std::vector<unsigned char> context_id; // context selection
+
+  void resetPhase(const unsigned int k=0) { root.tracker.resetPhase(k); }
+
+  // Belief defined as joint pdf (y: state, s: context): p(y, s)
+  double getCurrentBelief(const State& y) {
+    return modes[0].tracker.getContextBelief() * root.tracker.getCurrentBelief(y);
+  }
+  double getBeliefAndPhase(const State& y, unsigned int& k_best, const unsigned int stride) {
+    return modes[0].tracker.getContextBelief() * root.tracker.getBelief(y, k_best, stride, active);
+  }
+
+  DynamicReference getReference(const State& y) { return root.tracker.getReference(y); }
 };
 
 class PAC {

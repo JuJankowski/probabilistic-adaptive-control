@@ -41,7 +41,7 @@ void PAC::addTask(const TaskConstPtr& msg)
   // Check if ID is new
   for(auto &task : tasks_) {
     if(task.id == msg->id) {
-      for(auto &mode_ : task.relative_modes) {
+      for(auto &mode_ : task.modes) {
         if(mode.frame_id == mode_.frame_id) {
           task_mutex_->lock();
           mode_ = mode;
@@ -52,7 +52,7 @@ void PAC::addTask(const TaskConstPtr& msg)
       }
       task_mutex_->lock();
       task.invalid_references = true;
-      task.relative_modes.push_back(mode);
+      task.modes.push_back(mode);
       task_mutex_->unlock();
       ROS_INFO_STREAM("PAC: New mode for task with ID " << (unsigned int)task.id << " registered.");
       return;
@@ -71,12 +71,12 @@ void PAC::addTask(const TaskConstPtr& msg)
   task.goal = msg->goal;
   task.remove_after_success = msg->remove_after_success;
   task.context_id = msg->context_id;
-  task.relative_modes.push_back(mode);
+  task.modes.push_back(mode);
   task.registration_time = ros::Time::now();
   
-  task.mode.frame_id = msg->reference_frame;
-  task.mode.tracker = ProTrajTracker(3);
-  task.mode.tracker.setup(*msg, sigma_q_, sigma_dq_);
+  task.root.frame_id = msg->reference_frame;
+  task.root.tracker = ProTrajTracker(3);
+  task.root.tracker.setup(*msg, sigma_q_, sigma_dq_);
     
   ROS_INFO_STREAM("PAC: New task with ID " << (unsigned int)task.id << " registered.");
   
@@ -112,17 +112,17 @@ void PAC::updateEnvironmentInference(const ContextArrayConstPtr& msg)
     // Arbitrary basis function support
     // Update reference frames -> product of Gaussians in base frame
     // 1. Construct full rank square transformation matrix
-    unsigned int ndof = task.mode.tracker.getNumDoF();
-    unsigned int dimw = task.mode.tracker.getDimW();
+    unsigned int ndof = task.root.tracker.getNumDoF();
+    unsigned int dimw = task.root.tracker.getDimW();
     
     unsigned int num_samples = dimw / ndof; // The result is an integer if the task is defined properly
     Eigen::MatrixXd Phi_tilde = Eigen::MatrixXd::Zero(dimw, dimw);
     
-    unsigned int K = task.mode.tracker.getMaxPhase();
+    unsigned int K = task.root.tracker.getMaxPhase();
     double factor = (double)(K-1) / (double)(num_samples-1);
     for(unsigned int i = 0; i < num_samples; i++) {
       unsigned int k = (unsigned int)(factor * i);
-      Phi_tilde.block(i*ndof, 0, ndof, dimw) = task.mode.tracker.getPhi(k);
+      Phi_tilde.block(i*ndof, 0, ndof, dimw) = task.root.tracker.getPhi(k);
     }
     Eigen::MatrixXd Phi_tilde_inv = Phi_tilde.partialPivLu().inverse();
     
@@ -131,7 +131,7 @@ void PAC::updateEnvironmentInference(const ContextArrayConstPtr& msg)
     mu_w_O.clear();
     lambda_w_O.clear();
     task.invalid_references = false;
-    for(auto &mode : task.relative_modes) {
+    for(auto &mode : task.modes) {
       mode.tracker.updateContext(context);
       auto traj_dist_frame = mode.tracker.getTrajDist();
       
@@ -169,7 +169,7 @@ void PAC::updateEnvironmentInference(const ContextArrayConstPtr& msg)
     mu_w_O.clear();
     lambda_w_O.clear();
     task.invalid_references = false;
-    for(auto &mode : task.relative_modes) {
+    for(auto &mode : task.modes) {
       mode.tracker.updateContext(context);
       auto traj_dist_frame = mode.tracker.getTrajDist();
       
@@ -204,12 +204,12 @@ void PAC::updateEnvironmentInference(const ContextArrayConstPtr& msg)
     if(!task.invalid_references) {
       Eigen::MatrixXd lambda_w = Eigen::MatrixXd::Zero(mu_w_O[0].size(), mu_w_O[0].size());
       Eigen::VectorXd mu_w_tmp = Eigen::VectorXd::Zero(mu_w_O[0].size());
-      for(unsigned int i = 0; i < task.relative_modes.size(); i++) {
+      for(unsigned int i = 0; i < task.modes.size(); i++) {
         lambda_w += lambda_w_O[i];
         mu_w_tmp += lambda_w_O[i] * mu_w_O[i];
       }
       Eigen::MatrixXd sigma_w = invertPD(lambda_w);
-      double scaling = (double)task.relative_modes.size();
+      double scaling = (double)task.modes.size();
       
       Gaussian traj_dist;
       traj_dist.sigma = sigma_w * scaling;
@@ -218,7 +218,7 @@ void PAC::updateEnvironmentInference(const ContextArrayConstPtr& msg)
       traj_dist.sigma_inverted = true;
       
       task_mutex_->lock();
-      task.mode.tracker.setTrajDist(traj_dist);
+      task.root.tracker.setTrajDist(traj_dist);
       task_mutex_->unlock();
     }
   }
@@ -245,20 +245,32 @@ void PAC::updateTaskTimeInference(const State& y, const bool gripper_open)
       }
     }
     
-    if(!task.active) {
-      task.mode.tracker.resetPhase(0);
-    }
-    double belief = task.relative_modes[0].tracker.getContextBelief() * task.mode.tracker.getCurrentBelief(y);
+    // This version can switch tasks active only at the first time step
+    // if(!task.active) {
+    //   task.resetPhase(0);
+    // }
+    // double belief = task.getCurrentBelief(y);
       
+    // This version can switch tasks active at any time step (except for time steps close to the end)
+    // , but does not change the phase while being active
+    // double belief = 0.0;
+    // if(task.active) {
+    //   belief = task.getCurrentBelief(y);
+    // } else {
+    //   unsigned int k;
+    //   belief = task.getBeliefAndPhase(y, k, belief_stride_) / 10.0;
+    //   task.resetPhase(k);
+    // }
     
-    //unsigned int k;
-    //double belief = task.relative_modes[0].tracker.getContextBelief() * task.mode.tracker.getBelief(y, k, belief_stride_, !task.active);
-    //task.mode.tracker.resetPhase(k);
-    /*if(!task.active) {
-      task.mode.tracker.resetPhase(k);
+
+    // This version can switch tasks active at any time step (except for time steps close to the end)
+    // , but does not change the phase while being active
+    unsigned int k;
+    double belief = task.getBeliefAndPhase(y, k, belief_stride_);
+    task.resetPhase(k);
+    if(!task.active) {
       belief /= 10.0;
-    }*/
-    std::cout << (unsigned int)task.id << ": " << belief /*<< ", " << k*/ << std::endl;
+    }
       
     if(belief > max_belief) {
       max_belief = belief;
@@ -289,7 +301,7 @@ double PAC::getCurrentPhase()
 {
   for(auto &task : tasks_) {
     if(task.active) {
-      return task.mode.tracker.getRelativePhase();
+      return task.root.tracker.getRelativePhase();
     }
   }
   return -1.0;
@@ -331,22 +343,22 @@ bool PAC::control(const State& y, const Eigen::Quaterniond& quat, DynamicReferen
     if(!task.active) {
       continue;
     }
-    // TODO: check first part of if
-    if(task.relative_modes[0].tracker.getContextBelief() * task.mode.tracker.getCurrentBelief(y) < belief_threshold_) {
+    
+    if(task.getCurrentBelief(y) < belief_threshold_) {
       task.active = false;
       break;
     }
     active = true;
-    ref = task.mode.tracker.getReference(y);
+    ref = task.getReference(y);
     last_reference_ = ref;
-    for(auto &mode : task.relative_modes) {
+    for(auto &mode : task.modes) {
       Eigen::Quaterniond mu_quat = ref_handler_.getRefQuaternion(mode.frame_id) * mode.mu_quat.conjugate();
       Eigen::Matrix3d R = ref_handler_.getRefRotation(mode.frame_id);
       ori_refs.push_back(R * mode.P_dtheta * R.transpose() * quaternionLogMap(mu_quat * quat.conjugate()));
     }
-    task.mode.tracker.forwardPhase();
+    task.root.tracker.forwardPhase();
     
-    if(task.mode.tracker.getRelativePhase() == 1.0) {
+    if(task.root.tracker.getRelativePhase() == 1.0) {
       gripper_action = task.goal;
       finished_task_id_ = task.id;
     }

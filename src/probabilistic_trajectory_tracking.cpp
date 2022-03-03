@@ -182,14 +182,12 @@ double ProTrajTracker::getCurrentBelief(const State& x, const Eigen::VectorXd& m
   sigma_x.block(0, 0, ndof_, ndof_) += sigma_q_;
   sigma_x.block(ndof_, ndof_, ndof_, ndof_) += sigma_dq_;  
   
-  double state_probability = pdf(x_vec, mu_x, sigma_x);
-  
-  last_belief_ = state_probability * context_probability_;
+  last_belief_ = pdf(x_vec, mu_x, sigma_x);
   
   return last_belief_;
 }
 
-double ProTrajTracker::getBelief(const State& x, unsigned int& k_best, const unsigned int stride, const bool closest)
+double ProTrajTracker::getBelief(const State& x, unsigned int& k_best, const unsigned int stride, const bool active)
 {
   if(!is_setup_) {
     return 0.0;
@@ -206,10 +204,10 @@ double ProTrajTracker::getBelief(const State& x, unsigned int& k_best, const uns
   }
   
   unsigned int k_center;
-  if(closest) {
-    // find closest euclidean distance in position along horizon
+  if(!active) {
+    // find closest euclidean distance in position along horizon (excluding end part)
     double d_min = 1000.0;
-    for(unsigned int k = 0; k < K_; k++) {
+    for(unsigned int k = 0; k < (unsigned int)(0.75 * K_); k++) {
       Eigen::VectorXd e = x.q - basis_.Phi_q[k] * mu_w;
       double d = e.dot(e);
       if(d < d_min) {
@@ -221,7 +219,7 @@ double ProTrajTracker::getBelief(const State& x, unsigned int& k_best, const uns
     k_center = k_;
   }
   
-  unsigned int k_low = std::max((unsigned int)0, k_center - stride);
+  unsigned int k_low = std::max((unsigned int)30, k_center - stride);
   unsigned int k_high = std::min(K_, k_center + stride);
   
   unsigned int k_internal = k_;
@@ -234,7 +232,8 @@ double ProTrajTracker::getBelief(const State& x, unsigned int& k_best, const uns
       k_best = k;
     }
   }
-  if(k_low > 0) {
+
+  if(!active) {
     k_ = 0;
     b = getCurrentBelief(x, mu_w, sigma_w);
     if(b > b_max) {
